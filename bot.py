@@ -6,12 +6,13 @@ from datetime import datetime
 TOKEN = "8667734362:AAGIWC0f3HdnEINFXdtqNIC-YuDlijJ5yDQ"
 
 ADMIN_USERNAME = "userzubik"  # без @
-ADMIN_ID = None
+CHANNEL = "@bomjreid"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 waiting_users = set()
+pending_posts = {}  # id сообщения -> данные
 
 keyboard = types.ReplyKeyboardMarkup(
     keyboard=[
@@ -26,90 +27,132 @@ keyboard = types.ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
+# --- маска ---
+def mask_username(username: str):
+    if not username:
+        return "unknown"
+    if len(username) <= 4:
+        return username[0] + "***"
+    return username[:2] + "***" + username[-2:]
 
-# -------- START --------
+
+# --- START ---
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    global ADMIN_ID
+    await message.answer("Привет 👋\nВыбери действие:", reply_markup=keyboard)
 
-    # фиксируем админа по username
-    if message.from_user.username == ADMIN_USERNAME:
-        ADMIN_ID = message.from_user.id
 
+# --- КНОПКИ ---
+@dp.message(lambda m: m.text == "Союз")
+async def union(message: types.Message):
     await message.answer(
-        "Привет! 👋\nВыбери действие:",
-        reply_markup=keyboard
+        "🤝 Для вступления в союз свяжитесь с @userzubik\n"
+        "Вам объяснят условия и дальнейшие действия."
     )
 
-
-# -------- BUTTONS --------
-@dp.message(lambda msg: msg.text == "Союз")
-async def union(message: types.Message):
-    await message.answer("Вам к @userzubik")
-
-
-@dp.message(lambda msg: msg.text == "Информация")
+@dp.message(lambda m: m.text == "Информация")
 async def info(message: types.Message):
-    await message.answer("Юзернейм: @bomjreid")
+    await message.answer(
+        "ℹ️ Информация о системе\n\n"
+        "Администрирование: @bomjreid"
+    )
 
-
-@dp.message(lambda msg: msg.text == "Слить")
+@dp.message(lambda m: m.text == "Слить")
 async def sliv(message: types.Message):
     waiting_users.add(message.from_user.id)
-
     await message.answer(
-        "⚠️ Отправьте сообщение или фото с:\n"
-        "— доказательством\n"
-        "— описанием ситуации\n"
-        "— своими намерениями"
+        "⚠️ Подача заявки\n\n"
+        "📸 фото ОБЯЗАТЕЛЬНО\n"
+        "📝 описание + намерения\n\n"
+        "Без фото — отказ."
     )
 
 
-# -------- HANDLE SLIV --------
+# --- ПРИЁМ ---
 @dp.message()
-async def handle_sliv(message: types.Message):
-    global ADMIN_ID
-
+async def handler(message: types.Message):
     if message.from_user.id not in waiting_users:
+        return
+
+    if not message.photo:
+        await message.answer("❌ Нужно фото.")
         return
 
     waiting_users.remove(message.from_user.id)
 
-    username = message.from_user.username or "no_username"
+    username_masked = mask_username(message.from_user.username or "unknown")
 
-    text_info = (
-        f"🔥 НОВАЯ ЗАЯВКА НА СЛИВ\n"
-        f"👤 От: @{username}\n"
-        f"🆔 ID: {message.from_user.id}\n"
-        f"⏰ Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    text = (
+        f"🔥 НОВАЯ ЗАЯВКА\n"
+        f"👤 {username_masked}\n"
+        f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"{message.caption or ''}"
     )
 
-    # если фото
-    if message.photo:
-        file_id = message.photo[-1].file_id
-        caption = message.caption or ""
+    file_id = message.photo[-1].file_id
 
-        if ADMIN_ID:
-            await bot.send_photo(
-                ADMIN_ID,
-                photo=file_id,
-                caption=text_info + caption
-            )
+    # отправка админу
+    admin_msg = await bot.send_photo(
+        chat_id=f"@{ADMIN_USERNAME}",
+        photo=file_id,
+        caption=text,
+        reply_markup=types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(text="✅ Принять", callback_data="approve"),
+                    types.InlineKeyboardButton(text="❌ Отклонить", callback_data="reject"),
+                ]
+            ]
+        )
+    )
 
-    # если текст
-    elif message.text:
-        if ADMIN_ID:
-            await bot.send_message(
-                ADMIN_ID,
-                text=text_info + message.text
-            )
+    # сохраняем заявку
+    pending_posts[admin_msg.message_id] = {
+        "photo": file_id,
+        "text": text
+    }
 
-    await message.answer("✅ Заявка отправлена админу.")
+    await message.answer("✅ Заявка отправлена на проверку.")
 
 
+# --- CALLBACK ---
+@dp.callback_query(lambda c: c.data in ["approve", "reject"])
+async def callbacks(callback: types.CallbackQuery):
+    message_id = callback.message.message_id
+
+    if message_id not in pending_posts:
+        await callback.answer("Уже обработано")
+        return
+
+    data = pending_posts.pop(message_id)
+
+    # только админ может нажимать
+    if callback.from_user.username != ADMIN_USERNAME:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    if callback.data == "approve":
+        # отправка в канал
+        await bot.send_photo(
+            chat_id=CHANNEL,
+            photo=data["photo"],
+            caption=data["text"]
+        )
+        await callback.message.edit_caption(
+            callback.message.caption + "\n\n✅ ОДОБРЕНО"
+        )
+
+    else:
+        await callback.message.edit_caption(
+            callback.message.caption + "\n\n❌ ОТКЛОНЕНО"
+        )
+
+    await callback.answer("Готово")
+
+
+# --- RUN ---
 async def main():
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
